@@ -104,23 +104,22 @@ impl UserListerBackendHandler for SqlBackendHandler {
         // To simplify the query, we always fetch groups. TODO: cleanup.
         _get_groups: bool,
     ) -> Result<Vec<UserAndGroups>> {
+        let filters = filters
+            .map(|f| {
+                UserColumn::UserId
+                    .in_subquery(
+                        model::User::find()
+                            .find_also_linked(model::memberships::UserToGroup)
+                            .select_only()
+                            .column(UserColumn::UserId)
+                            .filter(get_user_filter_expr(f))
+                            .into_query(),
+                    )
+                    .into_condition()
+            })
+            .unwrap_or_else(|| SimpleExpr::Value(true.into()).into_condition());
         let mut users: Vec<_> = model::User::find()
-            .filter(
-                filters
-                    .map(|f| {
-                        UserColumn::UserId
-                            .in_subquery(
-                                model::User::find()
-                                    .find_also_linked(model::memberships::UserToGroup)
-                                    .select_only()
-                                    .column(UserColumn::UserId)
-                                    .filter(get_user_filter_expr(f))
-                                    .into_query(),
-                            )
-                            .into_condition()
-                    })
-                    .unwrap_or_else(|| SimpleExpr::Value(true.into()).into_condition()),
-            )
+            .filter(filters.clone())
             .order_by_asc(UserColumn::UserId)
             .find_with_linked(model::memberships::UserToGroup)
             .order_by_asc(SimpleExpr::Column(
@@ -134,10 +133,18 @@ impl UserListerBackendHandler for SqlBackendHandler {
                 groups: Some(groups.into_iter().map(Into::<GroupDetails>::into).collect()),
             })
             .collect();
+
         // At this point, the users don't have attributes, we need to populate it with another query.
-        let user_ids = users.iter().map(|u| &u.user.user_id);
         let attributes = model::UserAttributes::find()
-            .filter(model::UserAttributesColumn::UserId.is_in(user_ids))
+            .filter(
+                model::UserAttributesColumn::UserId.in_subquery(
+                    model::User::find()
+                        .filter(filters)
+                        .select_only()
+                        .column(model::users::Column::UserId)
+                        .into_query(),
+                ),
+            )
             .order_by_asc(model::UserAttributesColumn::UserId)
             .order_by_asc(model::UserAttributesColumn::AttributeName)
             .all(&self.sql_pool)
