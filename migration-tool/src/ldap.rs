@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Context, Result};
 use ldap3::{ResultEntry, SearchEntry};
-use requestty::{prompt_one, Question};
 use smallvec::SmallVec;
 
 use crate::lldap::User;
@@ -53,32 +52,9 @@ fn autocomplete_domain_suffix(input: String, domain: &str) -> SmallVec<[String; 
 /// Returns the LDAP URL.
 fn get_ldap_url() -> Result<String> {
     let ldap_protocols = &[("ldap://", 389), ("ldaps://", 636)];
-    let question = Question::input("ldap_url")
-        .message("LDAP_URL (ldap://...)")
-        .auto_complete(|answer, _| {
-            let mut answers = SmallVec::<[String; 1]>::new();
-            if "ldap://".starts_with(&answer) {
-                answers.push("ldap://".to_owned());
-            }
-            if "ldaps://".starts_with(&answer) {
-                answers.push("ldaps://".to_owned());
-            }
-            answers.push(answer);
-            answers
-        })
-        .validate(|url, _| {
-            if let Some(url) = check_host_exists(url, ldap_protocols)? {
-                ldap3::LdapConn::new(&url)
-                    .map_err(|e| format!("Could not connect to LDAP server: {}", e))?;
-                Ok(())
-            } else {
-                Err("LDAP URL should start with 'ldap://' or 'ldaps://'".to_owned())
-            }
-        })
-        .build();
-    let answer = prompt_one(question)?;
+    let answer = std::env::var("LDAP_URL").unwrap();
     Ok(
-        check_host_exists(answer.as_string().unwrap(), ldap_protocols)
+        check_host_exists(&answer, ldap_protocols)
             .unwrap()
             .unwrap(),
     )
@@ -88,47 +64,10 @@ fn get_ldap_url() -> Result<String> {
 /// DN.
 fn bind_ldap(
     ldap_connection: &mut ldap3::LdapConn,
-    previous_binddn: Option<String>,
+    _previous_binddn: Option<String>,
 ) -> Result<String> {
-    let binddn = {
-        let question = Question::input("ldap_binddn")
-            .message("LDAP_BIND_DN (cn=...)")
-            .validate(|dn, _| {
-                if dn.contains(',') && dn.contains('=') {
-                    Ok(())
-                } else {
-                    Err(
-                        "Invalid bind DN, expected something like 'cn=admin,dc=example,dc=com'"
-                            .to_owned(),
-                    )
-                }
-            })
-            .auto_complete(|answer, _| {
-                let mut answers = SmallVec::<[String; 1]>::new();
-                if let Some(binddn) = &previous_binddn {
-                    answers.push(binddn.clone());
-                }
-                answers.push(answer);
-                answers
-            })
-            .build();
-        let answer = prompt_one(question)?;
-        answer.as_string().unwrap().to_owned()
-    };
-    let password = {
-        let question = Question::password("ldap_bind_password")
-            .message("LDAP_BIND_PASSWORD")
-            .validate(|password, _| {
-                if !password.is_empty() {
-                    Ok(())
-                } else {
-                    Err("Empty password".to_owned())
-                }
-            })
-            .build();
-        let answer = prompt_one(question)?;
-        answer.as_string().unwrap().to_owned()
-    };
+    let binddn = std::env::var("LDAP_USER").unwrap();
+    let password = std::env::var("LDAP_PASS").unwrap();
     if let Err(e) = ldap_connection
         .simple_bind(&binddn, &password)
         .and_then(ldap3::LdapResult::success)
@@ -162,6 +101,7 @@ impl TryFrom<ResultEntry> for User {
             .or_else(|_| get_required_attribute("userPrincipalName"))?;
         let email = get_required_attribute("mail")
             .or_else(|_| get_required_attribute("rfc822mailbox"))
+            .or_else(|_| get_required_attribute("uid"))
             .context(format!("for user '{}'", id))?;
 
         let get_optional_attribute = |attr: &str| {
@@ -248,44 +188,8 @@ pub fn get_users(connection: &mut LdapClient) -> Result<Vec<User>, anyhow::Error
         domain,
     } = connection;
     let domain = domain.as_str();
-    let (maybe_user_ou, all_ous) = detect_ou(ldap_connection, domain, OuType::User)?;
-    let user_ou = {
-        let question = Question::input("ldap_user_ou")
-            .message(format!(
-                "Where are the users located (under '{}')? {}(LDAP_USERS_DN)",
-                domain,
-                maybe_user_ou
-                    .as_ref()
-                    .map(|ou| format!("Detected: {}", ou))
-                    .unwrap_or_default()
-            ))
-            .validate(|dn, _| {
-                if dn.contains('=') {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "Invalid bind DN, expected something like 'ou=people,{}'",
-                        domain
-                    ))
-                }
-            })
-            .default(maybe_user_ou.unwrap_or_default())
-            .auto_complete(|s, _| {
-                let mut answers = autocomplete_domain_suffix(s, domain);
-                answers.extend(all_ous.clone());
-                answers
-            })
-            .build();
-        let answer = prompt_one(question)?;
-        let mut answer = answer.as_string().unwrap().to_owned();
-        if !answer.ends_with(domain) {
-            if !answer.is_empty() {
-                answer += ",";
-            }
-            answer += domain;
-        }
-        answer
-    };
+    let (_maybe_user_ou, _all_ous) = detect_ou(ldap_connection, domain, OuType::User)?;
+    let user_ou = std::env::var("LDAP_USERS_DN").unwrap_or(domain.to_string());
     let users = ldap_connection
         .search(
             &user_ou,
@@ -360,44 +264,8 @@ pub fn get_groups(connection: &mut LdapClient) -> Result<Vec<LdapGroup>> {
         domain,
     } = connection;
     let domain = domain.as_str();
-    let (maybe_group_ou, all_ous) = detect_ou(ldap_connection, domain, OuType::Group)?;
-    let group_ou = {
-        let question = Question::input("ldap_group_ou")
-            .message(format!(
-                "Where are the groups located (under '{}')? {}(LDAP_GROUPS_DN)",
-                domain,
-                maybe_group_ou
-                    .as_ref()
-                    .map(|ou| format!("Detected: {}", ou))
-                    .unwrap_or_default()
-            ))
-            .validate(|dn, _| {
-                if dn.contains('=') {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "Invalid bind DN, expected something like 'ou=groups,{}'",
-                        domain
-                    ))
-                }
-            })
-            .default(maybe_group_ou.unwrap_or_default())
-            .auto_complete(|s, _| {
-                let mut answers = autocomplete_domain_suffix(s, domain);
-                answers.extend(all_ous.clone());
-                answers
-            })
-            .build();
-        let answer = prompt_one(question)?;
-        let mut answer = answer.as_string().unwrap().to_owned();
-        if !answer.ends_with(domain) {
-            if !answer.is_empty() {
-                answer += ",";
-            }
-            answer += domain;
-        }
-        answer
-    };
+    let (_maybe_group_ou, _all_ous) = detect_ou(ldap_connection, domain, OuType::Group)?;
+    let group_ou = std::env::var("LDAP_GROUPS_DN").unwrap_or(domain.to_string());
     let groups = ldap_connection
         .search(
             &group_ou,

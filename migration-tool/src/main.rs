@@ -3,22 +3,12 @@
 use std::collections::HashSet;
 
 use anyhow::{anyhow, Result};
-use requestty::{prompt_one, Question};
 
 mod ldap;
 mod lldap;
 
 use ldap::LdapGroup;
 use lldap::{LldapGroup, User};
-
-fn ask_generic_confirmation(name: &str, message: &str) -> Result<bool> {
-    let confirm = Question::confirm(name)
-        .message(message)
-        .default(true)
-        .build();
-    let answer = prompt_one(confirm)?;
-    Ok(answer.as_bool().unwrap())
-}
 
 fn get_users_to_add(users: &[User], existing_users: &[String]) -> Result<Option<Vec<User>>> {
     let existing_users = HashSet::<&String>::from_iter(existing_users);
@@ -47,10 +37,6 @@ fn get_users_to_add(users: &[User], existing_users: &[String]) -> Result<Option<
             .join(",\n  ")
     );
     if !input_users.is_empty()
-        && ask_generic_confirmation(
-            "proceed_users",
-            "Do you want to proceed to add those users to LLDAP?",
-        )?
     {
         Ok(Some(input_users))
     } else {
@@ -77,11 +63,7 @@ fn should_insert_groups(
             .collect::<Vec<_>>()
             .join(",\n  ")
     );
-    Ok(num_new_groups != 0
-        && ask_generic_confirmation(
-            "proceed_groups",
-            "Do you want to proceed to add those groups to LLDAP?",
-        )?)
+    Ok(num_new_groups != 0)
 }
 
 struct GroupList {
@@ -93,8 +75,6 @@ fn migrate_groups(
     graphql_client: &lldap::GraphQLClient,
     ldap_connection: &mut ldap::LdapClient,
 ) -> Result<Option<GroupList>> {
-    Ok(
-        if ask_generic_confirmation("should_import_groups", "Do you want to import groups?")? {
             let mut existing_groups = lldap::get_lldap_groups(graphql_client)?;
             let ldap_groups = ldap::get_groups(ldap_connection)?;
             if should_insert_groups(&ldap_groups, &existing_groups)? {
@@ -104,14 +84,10 @@ fn migrate_groups(
                     graphql_client,
                 )?;
             }
-            Some(GroupList {
+            Ok(Some(GroupList {
                 ldap_groups,
                 lldap_groups: existing_groups,
-            })
-        } else {
-            None
-        },
-    )
+            }))
 }
 
 struct UserList {
@@ -123,21 +99,15 @@ fn migrate_users(
     graphql_client: &lldap::GraphQLClient,
     ldap_connection: &mut ldap::LdapClient,
 ) -> Result<Option<UserList>> {
-    Ok(
-        if ask_generic_confirmation("should_import_users", "Do you want to import users?")? {
             let mut existing_users = lldap::get_lldap_users(graphql_client)?;
             let users = ldap::get_users(ldap_connection)?;
             if let Some(users_to_add) = get_users_to_add(&users, &existing_users)? {
                 lldap::insert_users_into_lldap(users_to_add, &mut existing_users, graphql_client)?;
             }
-            Some(UserList {
+            Ok(Some(UserList {
                 lldap_users: existing_users,
                 ldap_users: users,
-            })
-        } else {
-            None
-        },
-    )
+            }))
 }
 
 fn migrate_memberships(
@@ -189,19 +159,11 @@ fn main() -> Result<()> {
         "The migration tool requires access to both the original LDAP \
          server and the HTTP API of the target LLDAP server."
     );
-    if !ask_generic_confirmation("setup_ready", "Are you ready to start?")? {
-        return Ok(());
-    }
     let mut ldap_connection = ldap::get_ldap_connection()?;
     let graphql_client = lldap::get_lldap_client()?;
     let user_list = migrate_users(&graphql_client, &mut ldap_connection)?;
     let group_list = migrate_groups(&graphql_client, &mut ldap_connection)?;
-    if ask_generic_confirmation(
-        "should_import_memberships",
-        "Do you want to import group memberships?",
-    )? {
-        migrate_memberships(user_list, group_list, graphql_client, &mut ldap_connection)?;
-    }
+    migrate_memberships(user_list, group_list, graphql_client, &mut ldap_connection)?;
 
     Ok(())
 }

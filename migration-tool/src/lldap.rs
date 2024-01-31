@@ -2,9 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, bail, Context, Result};
 use graphql_client::GraphQLQuery;
-use requestty::{prompt_one, Question};
 use reqwest::blocking::{Client, ClientBuilder};
-use smallvec::SmallVec;
+
 
 use crate::ldap::{check_host_exists, LdapGroup};
 
@@ -174,38 +173,10 @@ fn try_login(
 pub fn get_lldap_user_and_password(
     lldap_server: &str,
     client: &Client,
-    previous_username: Option<String>,
+    _previous_username: Option<String>,
 ) -> Result<String> {
-    let username = {
-        let question = Question::input("lldap_username")
-            .message("LLDAP_USERNAME (default=admin)")
-            .default("admin")
-            .auto_complete(|answer, _| {
-                let mut answers = SmallVec::<[String; 1]>::new();
-                if let Some(username) = &previous_username {
-                    answers.push(username.clone());
-                }
-                answers.push(answer);
-                answers
-            })
-            .build();
-        let answer = prompt_one(question)?;
-        answer.as_string().unwrap().to_owned()
-    };
-    let password = {
-        let question = Question::password("lldap_password")
-            .message("LLDAP_PASSWORD")
-            .validate(|password, _| {
-                if !password.is_empty() {
-                    Ok(())
-                } else {
-                    Err("Empty password".to_owned())
-                }
-            })
-            .build();
-        let answer = prompt_one(question)?;
-        answer.as_string().unwrap().to_owned()
-    };
+    let username = std::env::var("LLDAP_USER").unwrap_or("admin".to_string());
+    let password = std::env::var("LLDAP_PASS").unwrap();
     match try_login(lldap_server, &username, &password, client) {
         Err(e) => {
             println!("Could not login: {:#?}", e);
@@ -249,22 +220,15 @@ pub fn insert_users_into_lldap(
                     if skip_all {
                         break;
                     }
-                    let question = requestty::Question::select("skip_user")
-                        .message(format!("Error while adding user {}", &uid))
-                        .choices(vec!["Skip", "Retry", "Skip all"])
-                        .default_separator()
-                        .choice("Abort")
-                        .build();
-                    let answer = prompt_one(question)?;
-                    let choice = answer.as_list_item().unwrap();
-                    match choice.text.as_str() {
-                        "Skip" => break,
-                        "Retry" => continue,
-                        "Skip all" => {
+                    let choice = std::env::var("ACTION_USER").unwrap_or("abort".to_string()).to_lowercase();
+                    match choice.as_str() {
+                        "skip" => break,
+                        "retry" => continue,
+                        "skip_all" => {
                             skip_all = true;
                             break;
                         }
-                        "Abort" => return Err(e),
+                        "abort" => return Err(e),
                         _ => unreachable!(),
                     }
                 }
@@ -307,22 +271,15 @@ pub fn insert_groups_into_lldap(
                     if skip_all {
                         break;
                     }
-                    let question = requestty::Question::select("skip_group")
-                        .message(format!("Error while adding group {}", &name))
-                        .choices(vec!["Skip", "Retry", "Skip all"])
-                        .default_separator()
-                        .choice("Abort")
-                        .build();
-                    let answer = prompt_one(question)?;
-                    let choice = answer.as_list_item().unwrap();
-                    match choice.text.as_str() {
-                        "Skip" => break,
-                        "Retry" => continue,
-                        "Skip all" => {
+                    let choice = std::env::var("ACTION_GROUP").unwrap_or("abort".to_string()).to_lowercase();
+                    match choice.as_str() {
+                        "skip" => break,
+                        "retry" => continue,
+                        "skip_all" => {
                             skip_all = true;
                             break;
                         }
-                        "Abort" => return Err(e),
+                        "abort" => return Err(e),
                         _ => unreachable!(),
                     }
                 }
@@ -416,25 +373,15 @@ pub fn insert_group_memberships_into_lldap(
                         if skip_all || skip_group {
                             break;
                         }
-                        let question = requestty::Question::select("skip_membership")
-                            .message(format!(
-                                "Error while adding '{}' to group '{}",
-                                &user, &group.name
-                            ))
-                            .choices(vec!["Skip", "Retry", "Skip group", "Skip all"])
-                            .default_separator()
-                            .choice("Abort")
-                            .build();
-                        let answer = prompt_one(question)?;
-                        let choice = answer.as_list_item().unwrap();
-                        match choice.text.as_str() {
-                            "Skip" => break,
-                            "Retry" => continue,
-                            "Skip group" => {
+                        let choice = std::env::var("ACTION_MEMBERSHIP").unwrap_or("abort".to_string()).to_lowercase();
+                        match choice.as_str() {
+                            "skip" => break,
+                            "retry" => continue,
+                            "skip_group" => {
                                 skip_group = true;
                                 break;
                             }
-                            "Skip all" => {
+                            "skip_all" => {
                                 skip_all = true;
                                 break;
                             }
@@ -454,45 +401,11 @@ pub fn insert_group_memberships_into_lldap(
     Ok(())
 }
 
-fn get_lldap_server(client: &Client) -> Result<String> {
+fn get_lldap_server(_client: &Client) -> Result<String> {
     let http_protocols = &[("http://", 17170), ("https://", 17170)];
-    let question = Question::input("lldap_url")
-        .message("LLDAP_URL (http://...)")
-        .auto_complete(|answer, _| {
-            let mut answers = SmallVec::<[String; 1]>::new();
-            if "http://".starts_with(&answer) {
-                answers.push("http://".to_owned());
-            }
-            if "https://".starts_with(&answer) {
-                answers.push("https://".to_owned());
-            }
-            answers.push(answer);
-            answers
-        })
-        .validate(|url, _| {
-            if let Some(url) = check_host_exists(url, http_protocols)? {
-                client
-                    .get(format!("{}/api/graphql", url))
-                    .send()
-                    .map_err(|e| format!("Host did not answer: {}", e))
-                    .and_then(|response| {
-                        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-                            Ok(())
-                        } else {
-                            Err("Host doesn't seem to be an LLDAP server".to_owned())
-                        }
-                    })
-            } else {
-                Err(
-                    "Could not resolve host (make sure it starts with 'http://' or 'https://')"
-                        .to_owned(),
-                )
-            }
-        })
-        .build();
-    let answer = prompt_one(question)?;
+    let answer = std::env::var("LLDAP_URL").unwrap();
     Ok(
-        check_host_exists(answer.as_string().unwrap(), http_protocols)
+        check_host_exists(&answer, http_protocols)
             .unwrap()
             .unwrap(),
     )
